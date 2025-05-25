@@ -5,7 +5,6 @@ from PIL import Image
 device = "cuda" if torch.cuda.is_available() else "cpu"
 clip_model, preprocess = clip.load("ViT-B/32", device=device)
 
-
 def get_image_embedding(image):
     image_input = preprocess(Image.fromarray(image)).unsqueeze(0).to(device)
     with torch.no_grad():
