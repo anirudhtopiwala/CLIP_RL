@@ -1,11 +1,13 @@
 import argparse
 import os
 
-os.environ["MUJOCO_GL"] = "osmesa"
+os.environ["MUJOCO_GL"] = "egl"
 os.environ["LD_PRELOAD"] = "/usr/lib/x86_64-linux-gnu/libGL.so.1"
+os.environ["LD_LIBRARY_PATH"] = "/usr/lib/x86_64-linux-gnu"
 
+import datetime
 import random
-
+import time
 import numpy as np
 import torch
 import torch.optim as optim
@@ -38,7 +40,9 @@ def train_policy(
 ):
     policy.train()
     print("Training CLIPPolicy...")
+    total_start_time = time.time()
     for episode in range(num_episodes):
+        episode_start_time = time.time()
         obs = env.reset()
         text_goal = "pick up the red cube"  # You can randomize this for goal-conditioned training
         goal_feat = get_text_embedding(text_goal)
@@ -47,6 +51,7 @@ def train_policy(
         log_probs = []
         rewards = []
         done = False
+        steps_in_episode = 0
         while not done:
             frame = obs["frontview_image"]
             img_feat = get_image_embedding(frame).to(device)
@@ -54,14 +59,19 @@ def train_policy(
             state_feat = state_feat.unsqueeze(0)
 
             action_mean = policy(state_feat)
-            action_dist = torch.distributions.Normal(action_mean, 1.0)
+            action_dist = torch.distributions.Normal(action_mean, 0.1)
             action = action_dist.sample()
             log_prob = action_dist.log_prob(action).sum()
 
             obs, reward, done, _ = env.step(action.squeeze().cpu().detach().numpy())
             log_probs.append(log_prob)
             rewards.append(reward)
+            steps_in_episode += 1
 
+        episode_duration = time.time() - episode_start_time
+        print(
+            f"Episode {episode+1} finished after {steps_in_episode} steps in {episode_duration:.2f} seconds."
+        )
         returns = compute_returns(rewards)
         returns = torch.tensor(returns, dtype=torch.float32, device=device)
         log_probs = torch.stack(log_probs)
@@ -82,13 +92,14 @@ def train_policy(
         # TensorBoard logging
         writer.add_scalar("Reward/Total", total_reward, episode)
         writer.add_scalar("Loss/policy_loss", loss.item(), episode)
+        writer.add_scalar("Episode/Duration", episode_duration, episode)
     return policy
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train CLIPPolicy with Robosuite")
     parser.add_argument(
-        "--num_episodes", type=int, default=1000, help="Number of training episodes"
+        "--num_episodes", type=int, default=250, help="Number of training episodes"
     )
     parser.add_argument(
         "--model_path",
@@ -97,16 +108,17 @@ def main():
         help="Path to model checkpoint to warm start",
     )
     parser.add_argument(
-        "--save_path",
+        "--model_name",
         type=str,
-        default="clip_policy.pt",
-        help="Path to save trained model",
+        default="clip_policy",
+        help="Name of the policy model. (for saving purposes)",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
 
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Training on device", device)
 
     env = create_env(is_renderer=False)
     print("Action Dim:", env.action_dim)
@@ -121,9 +133,11 @@ def main():
     train_policy(policy, optimizer, env, device, writer, num_episodes=args.num_episodes)
     writer.close()
 
-    # Save the trained model
-    torch.save(policy.state_dict(), args.save_path)
-    print(f"Model saved to {args.save_path}")
+    # Save the trained model with time stamp
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = f"models/{args.model_name}_episodes_{args.num_episodes}_{timestamp}.pt"
+    torch.save(policy.state_dict(), save_path)
+    print(f"Model saved to {save_path}")
 
 
 if __name__ == "__main__":

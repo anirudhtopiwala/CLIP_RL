@@ -10,5 +10,8 @@ def create_env(task="Lift", use_camera=True, is_renderer=True):
         use_camera_obs=use_camera,
         camera_names="frontview",
         reward_shaping=True,
+        horizon=250,
+        camera_heights=84,
+        camera_widths=84,
     )
     return env
