@@ -8,6 +8,7 @@ os.environ["LD_LIBRARY_PATH"] = "/usr/lib/x86_64-linux-gnu"
 import datetime
 import random
 import time
+
 import numpy as np
 import torch
 import torch.optim as optim
@@ -35,7 +36,138 @@ def compute_returns(rewards, gamma=0.99):
     return returns
 
 
-def train_policy(
+def compute_gae(rewards, values, dones, gamma=0.99, lam=0.95):
+    """Generalized Advantage Estimation (GAE) for computing advantages and returns."""
+    advantages = []
+    gae = 0
+    values = values + [0]
+    for step in reversed(range(len(rewards))):
+        delta = (
+            rewards[step] + gamma * values[step + 1] * (1 - dones[step]) - values[step]
+        )
+        gae = delta + gamma * lam * (1 - dones[step]) * gae
+        advantages.insert(0, gae)
+    returns = [adv + v for adv, v in zip(advantages, values[:-1])]
+    return advantages, returns
+
+
+def collect_trajectory(env, policy, device, max_steps=256):
+    obs = env.reset()
+    text_goal = "pick up the red cube"
+    goal_feat = get_text_embedding(text_goal).to(device)
+
+    states, actions, log_probs, rewards, dones, values = [], [], [], [], [], []
+    for _ in range(max_steps):
+        img_feat = get_image_embedding(obs["frontview_image"]).to(device)
+        proprio = torch.tensor(
+            obs["robot0_proprio-state"], dtype=torch.float32, device=device
+        )
+        state_feat = torch.cat([img_feat, goal_feat, proprio], dim=-1).unsqueeze(0)
+
+        with torch.no_grad():
+            action_mean, value = policy(state_feat)
+            action_dist = torch.distributions.Normal(action_mean, 0.1)
+            action = action_dist.sample()
+            log_prob = action_dist.log_prob(action).sum(dim=-1)
+
+        next_obs, reward, done, _ = env.step(action.squeeze(0).cpu().numpy())
+
+        states.append(state_feat.squeeze(0).cpu())
+        actions.append(action.squeeze(0).cpu())
+        log_probs.append(log_prob.cpu())
+        rewards.append(reward)
+        dones.append(float(done))
+        values.append(value.squeeze(0).cpu().item())
+
+        obs = next_obs
+        if done:
+            break
+    return states, actions, log_probs, rewards, dones, values
+
+
+def ppo_update(
+    policy,
+    optimizer,
+    device,
+    batch,
+    ppo_epochs=4,
+    mini_batch_size=64,
+    clip_epsilon=0.2,
+    value_coef=0.5,
+    entropy_coef=0.01,
+    grad_clip=1.0,
+):
+    states, actions, old_log_probs, returns, advantages = batch
+    states = torch.stack(states).to(device)
+    actions = torch.stack(actions).to(device)
+    old_log_probs = torch.stack(old_log_probs).to(device)
+    returns = torch.tensor(returns, dtype=torch.float32, device=device)
+    advantages = torch.tensor(advantages, dtype=torch.float32, device=device)
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+    total_loss = 0
+    for _ in range(ppo_epochs):
+        idx = torch.randperm(states.size(0))
+        for start in range(0, states.size(0), mini_batch_size):
+            end = start + mini_batch_size
+            mb_idx = idx[start:end]
+            mb_states = states[mb_idx]
+            mb_actions = actions[mb_idx]
+            mb_old_log_probs = old_log_probs[mb_idx]
+            mb_returns = returns[mb_idx]
+            mb_advantages = advantages[mb_idx]
+
+            action_mean, value = policy(mb_states)
+            action_dist = torch.distributions.Normal(action_mean, 0.1)
+            log_probs = action_dist.log_prob(mb_actions).sum(dim=-1)
+            entropy = action_dist.entropy().sum(dim=-1).mean()
+
+            ratio = (log_probs - mb_old_log_probs).exp()
+            surr1 = ratio * mb_advantages
+            surr2 = (
+                torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon)
+                * mb_advantages
+            )
+            policy_loss = -torch.min(surr1, surr2).mean()
+            value_loss = (mb_returns - value.squeeze(-1)).pow(2).mean()
+            loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), grad_clip)
+            optimizer.step()
+            total_loss += loss.item()
+    return total_loss / (ppo_epochs * max(1, states.size(0) // mini_batch_size))
+
+
+def train_policy(policy, optimizer, env, device, writer, num_episodes, grad_clip=1.0):
+    policy.train()
+    print("Training CLIPPolicy with PPO...")
+    for episode in range(num_episodes):
+        episode_start_time = time.time()
+        states, actions, log_probs, rewards, dones, values = collect_trajectory(
+            env, policy, device
+        )
+        advantages, returns = compute_gae(rewards, values, dones)
+        loss = ppo_update(
+            policy,
+            optimizer,
+            device,
+            batch=(states, actions, log_probs, returns, advantages),
+            grad_clip=grad_clip,
+        )
+        total_reward = sum(rewards)
+        episode_duration = time.time() - episode_start_time
+        print(
+            f"Episode {episode+1}, Total Reward: {total_reward:.2f}, Loss: {loss:.4f}, Duration: {episode_duration:.2f}s"
+        )
+        writer.add_scalar("Reward/Total", total_reward, episode)
+        writer.add_scalar("Loss/ppo_loss", loss, episode)
+        writer.add_scalar("Episode/Duration", episode_duration, episode)
+    return policy
+
+
+def train_policy_non_ppo(
     policy, optimizer, env, device, writer, num_episodes=1000, grad_clip=1.0
 ):
     policy.train()
@@ -121,9 +253,10 @@ def main():
     print("Training on device", device)
 
     env = create_env(is_renderer=False)
-    print("Action Dim:", env.action_dim)
-    policy = CLIPPolicy(embedding_dim=512, action_dim=env.action_dim).to(device)
-    optimizer = optim.Adam(policy.parameters(), lr=1e-3)
+    proprio_dim = env.observation_spec()["robot0_proprio-state"].shape[0]
+    embedding_dim = 512 + 512 + proprio_dim  # image + text + proprio
+    policy = CLIPPolicy(input_dim=embedding_dim, action_dim=env.action_dim).to(device)
+    optimizer = optim.Adam(policy.parameters(), lr=1e-4)
 
     if args.model_path is not None and os.path.exists(args.model_path):
         print(f"Loading weights from {args.model_path}")

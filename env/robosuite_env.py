@@ -8,6 +8,7 @@ def create_env(task="Lift", use_camera=True, is_renderer=True):
         has_renderer=is_renderer,
         has_offscreen_renderer=use_camera,
         use_camera_obs=use_camera,
+        use_object_obs=True,
         camera_names="frontview",
         reward_shaping=True,
         horizon=250,
