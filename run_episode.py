@@ -14,7 +14,6 @@ env = create_env()
 obs = env.reset()
 print("Acion Dim:", env.action_dim)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")  # Force CPU for compatibility
 
 proprio_dim = env.observation_spec()["robot0_proprio-state"].shape[0]
 embedding_dim = 512 + 512 + proprio_dim  # image + text + proprio
@@ -22,7 +21,7 @@ embedding_dim = 512 + 512 + proprio_dim  # image + text + proprio
 policy = CLIPPolicy(input_dim=embedding_dim, action_dim=env.action_dim).to(device)
 policy.load_state_dict(
     torch.load(
-        "models/clip_policy_episodes_100_20250526_201626.pt", map_location=device
+        "models/clip_policy_episodes_3000_20250527_075229.pt", map_location=device
     )
 )
 policy.eval()

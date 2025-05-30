@@ -140,7 +140,9 @@ def ppo_update(
     return total_loss / (ppo_epochs * max(1, states.size(0) // mini_batch_size))
 
 
-def train_policy(policy, optimizer, env, device, writer, num_episodes, grad_clip=1.0):
+def train_policy(
+    policy, optimizer, env, device, writer, num_episodes, model_name, grad_clip=1.0
+):
     policy.train()
     print("Training CLIPPolicy with PPO...")
     for episode in range(num_episodes):
@@ -164,6 +166,11 @@ def train_policy(policy, optimizer, env, device, writer, num_episodes, grad_clip
         writer.add_scalar("Reward/Total", total_reward, episode)
         writer.add_scalar("Loss/ppo_loss", loss, episode)
         writer.add_scalar("Episode/Duration", episode_duration, episode)
+
+        if (episode + 1) % 100 == 0:
+            checkpoint_path = f"models/{model_name}_checkpoint_ep{episode+1}.pt"
+            torch.save(policy.state_dict(), checkpoint_path)
+            print(f"Checkpoint saved to {checkpoint_path}")
     return policy
 
 
@@ -263,7 +270,15 @@ def main():
         policy.load_state_dict(torch.load(args.model_path, map_location=device))
 
     writer = SummaryWriter()
-    train_policy(policy, optimizer, env, device, writer, num_episodes=args.num_episodes)
+    train_policy(
+        policy,
+        optimizer,
+        env,
+        device,
+        writer,
+        num_episodes=args.num_episodes,
+        model_name=args.model_name,
+    )
     writer.close()
 
     # Save the trained model with time stamp
