@@ -51,7 +51,7 @@ def compute_gae(rewards, values, dones, gamma=0.99, lam=0.95):
     return advantages, returns
 
 
-def collect_trajectory(env, policy, device, max_steps=256):
+def collect_trajectory(env, policy, device, max_steps=512, exploration_std=0.1):
     obs = env.reset()
     text_goal = "pick up the red cube"
     goal_feat = get_text_embedding(text_goal).to(device)
@@ -66,7 +66,7 @@ def collect_trajectory(env, policy, device, max_steps=256):
 
         with torch.no_grad():
             action_mean, value = policy(state_feat)
-            action_dist = torch.distributions.Normal(action_mean, 0.1)
+            action_dist = torch.distributions.Normal(action_mean, exploration_std)
             action = action_dist.sample()
             log_prob = action_dist.log_prob(action).sum(dim=-1)
 
@@ -90,11 +90,11 @@ def ppo_update(
     optimizer,
     device,
     batch,
-    ppo_epochs=4,
+    ppo_epochs=6,
     mini_batch_size=64,
-    clip_epsilon=0.2,
+    clip_epsilon=0.3,
     value_coef=0.5,
-    entropy_coef=0.01,
+    entropy_coef=0.05,
     grad_clip=1.0,
 ):
     states, actions, old_log_probs, returns, advantages = batch
@@ -145,8 +145,23 @@ def train_policy(
 ):
     policy.train()
     print("Training CLIPPolicy with PPO...")
+
+    # Curriculum learning parameters
+    initial_exploration_std = 0.5  # Start with high exploration
+    final_exploration_std = 0.05  # End with low exploration
+    exploration_decay = (initial_exploration_std - final_exploration_std) / num_episodes
+    current_exploration_std = initial_exploration_std
+
     for episode in range(num_episodes):
         episode_start_time = time.time()
+
+        # Decay exploration as training progresses
+        current_exploration_std = max(
+            final_exploration_std, initial_exploration_std - episode * exploration_decay
+        )
+        print(
+            f"Episode {episode+1}/{num_episodes}, Exploration Std: {current_exploration_std:.4f}"
+        )
         states, actions, log_probs, rewards, dones, values = collect_trajectory(
             env, policy, device
         )
@@ -166,6 +181,7 @@ def train_policy(
         writer.add_scalar("Reward/Total", total_reward, episode)
         writer.add_scalar("Loss/ppo_loss", loss, episode)
         writer.add_scalar("Episode/Duration", episode_duration, episode)
+        writer.add_scalar("Training/exploration_std", current_exploration_std, episode)
 
         if (episode + 1) % 100 == 0:
             checkpoint_path = f"models/{model_name}_checkpoint_ep{episode+1}.pt"
