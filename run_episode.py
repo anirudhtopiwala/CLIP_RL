@@ -20,14 +20,12 @@ embedding_dim = 512 + 512 + proprio_dim  # image + text + proprio
 
 policy = CLIPPolicy(input_dim=embedding_dim, action_dim=env.action_dim).to(device)
 policy.load_state_dict(
-    torch.load(
-        "models/clip_policy_episodes_3000_20250527_075229.pt", map_location=device
-    )
+    torch.load("models/clip_policy_checkpoint_ep2500.pt", map_location=device)
 )
 policy.eval()
 print("Policy loaded successfully.")
 
-text_goal = "pick up the cube"
+text_goal = "pick up the red cube"
 goal_feat = get_text_embedding(text_goal)
 
 done = False
@@ -40,7 +38,7 @@ while not done:
 
     with torch.no_grad():
         action_mean, _ = policy(state_feat)
-    action = action_mean.squeeze(0).cpu().numpy()
+    action = torch.clamp(action_mean, -1.0, 1.0).squeeze(0).cpu().numpy()
 
     obs, reward, done, _ = env.step(action)
-    print("Reward:", reward)
+    print("Reward:", reward, "Action:", action[:3])

@@ -42,9 +42,9 @@ class DenseRewardWrapper(Wrapper):
         self.prev_gripper_to_cube_dist = gripper_to_cube_dist
 
         # Normalize and scale rewards with explicit weights.
-        distance_coef = 10
-        height_coef = 5
-        proximity_coef = 10
+        distance_coef = 1
+        height_coef = 2
+        proximity_coef = 1.5
 
         # Combine rewards (original + normalized dense shaping)
         total_reward = (
@@ -57,11 +57,14 @@ class DenseRewardWrapper(Wrapper):
         return obs, total_reward, done, info
 
     def _get_gripper_to_cube_distance(self):
-        gripper_to_cube_pos = self.env.observation_spec()["gripper_to_cube_pos"]
-        return np.linalg.norm(gripper_to_cube_pos)
+        obs = self.env._get_observations()
+        gripper_pos = obs["robot0_eef_pos"]
+        cube_pos = obs["cube_pos"]
+        return np.linalg.norm(gripper_pos - cube_pos)
 
     def _get_cube_pos(self):
-        return self.env.observation_spec()["cube_pos"]
+        obs = self.env._get_observations()
+        return obs["cube_pos"]
 
 
 def create_env(task="Lift", use_camera=True, is_renderer=True):

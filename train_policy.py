@@ -51,7 +51,9 @@ def compute_gae(rewards, values, dones, gamma=0.99, lam=0.95):
     return advantages, returns
 
 
-def collect_trajectory(env, policy, device, max_steps=512, exploration_std=0.1):
+def collect_trajectory(
+    env, policy, device, max_steps=512, exploration_std=0.1, action_repeat=4
+):
     obs = env.reset()
     text_goal = "pick up the red cube"
     goal_feat = get_text_embedding(text_goal).to(device)
@@ -70,16 +72,22 @@ def collect_trajectory(env, policy, device, max_steps=512, exploration_std=0.1):
             action = action_dist.sample()
             log_prob = action_dist.log_prob(action).sum(dim=-1)
 
-        next_obs, reward, done, _ = env.step(action.squeeze(0).cpu().numpy())
+        # Apply action repeat
+        total_reward = 0
+        for _ in range(action_repeat):
+            next_obs, reward, done, _ = env.step(action.squeeze(0).cpu().numpy())
+            total_reward += reward
+            obs = next_obs
+            if done:
+                break
 
         states.append(state_feat.squeeze(0).cpu())
         actions.append(action.squeeze(0).cpu())
         log_probs.append(log_prob.cpu())
-        rewards.append(reward)
+        rewards.append(total_reward)
         dones.append(float(done))
         values.append(value.squeeze(0).cpu().item())
 
-        obs = next_obs
         if done:
             break
     return states, actions, log_probs, rewards, dones, values
@@ -92,10 +100,11 @@ def ppo_update(
     batch,
     ppo_epochs=6,
     mini_batch_size=64,
-    clip_epsilon=0.3,
+    clip_epsilon=0.2,
     value_coef=0.5,
-    entropy_coef=0.05,
+    entropy_coef=0.01,
     grad_clip=1.0,
+    exploration_std=0.1,
 ):
     states, actions, old_log_probs, returns, advantages = batch
     states = torch.stack(states).to(device)
@@ -118,7 +127,7 @@ def ppo_update(
             mb_advantages = advantages[mb_idx]
 
             action_mean, value = policy(mb_states)
-            action_dist = torch.distributions.Normal(action_mean, 0.1)
+            action_dist = torch.distributions.Normal(action_mean, exploration_std)
             log_probs = action_dist.log_prob(mb_actions).sum(dim=-1)
             entropy = action_dist.entropy().sum(dim=-1).mean()
 
@@ -163,7 +172,12 @@ def train_policy(
             f"Episode {episode+1}/{num_episodes}, Exploration Std: {current_exploration_std:.4f}"
         )
         states, actions, log_probs, rewards, dones, values = collect_trajectory(
-            env, policy, device
+            env,
+            policy,
+            device,
+            max_steps=512,
+            exploration_std=current_exploration_std,
+            action_repeat=4,
         )
         advantages, returns = compute_gae(rewards, values, dones)
         loss = ppo_update(
@@ -172,6 +186,7 @@ def train_policy(
             device,
             batch=(states, actions, log_probs, returns, advantages),
             grad_clip=grad_clip,
+            exploration_std=current_exploration_std,
         )
         total_reward = sum(rewards)
         episode_duration = time.time() - episode_start_time
